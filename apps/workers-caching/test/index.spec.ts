@@ -45,4 +45,20 @@ describe("R2 key cache Worker", () => {
 			key,
 		});
 	});
+
+	it("can proactively trigger revalidation for the reader cache key", async () => {
+		const key = `refresh-${crypto.randomUUID()}.txt`;
+		await env.KEY_BUCKET.put(key, "updated value");
+
+		const response = await SELF.fetch(
+			`https://example.com/refresh/${encodeURIComponent(key)}`,
+			{ method: "POST" },
+		);
+
+		expect(response.status).toBe(202);
+		await expect(response.json()).resolves.toMatchObject({
+			key,
+			refreshTriggered: true,
+		});
+	});
 });

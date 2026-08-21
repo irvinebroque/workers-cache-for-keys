@@ -17,8 +17,8 @@ Both Workers bind the `workers-cache-for-keys` R2 bucket as `KEY_BUCKET`.
 | Tradeoff | Workers Caching | Cache API plus purge |
 | --- | --- | --- |
 | Freshness model | 30 seconds fresh, then stale content may be served for up to one day while revalidation runs | One-day TTL backed by a global purge whenever an R2 event reports a change |
-| Update behavior | First request after expiry receives hot stale data and triggers a background R2 refresh | R2 emits create/delete events to a Queue; the consumer globally purges that key's `Cache-Tag` |
-| Availability during refresh | Built-in stale-while-revalidate keeps serving the cached value | A globally purged key becomes a miss; the next request must read R2 before responding |
+| Update behavior | After updating R2, the updater requests `/refresh/<key>`; that request receives stale data and triggers a background refresh before user traffic arrives | R2 emits create/delete events to a Queue; the consumer globally purges that key's `Cache-Tag` |
+| Availability during refresh | The proactive refresh request absorbs the stale response while users continue receiving cached responses | A globally purged key becomes a miss; the next request must read R2 before responding |
 | Invalidation scope | Workers Caching supports coordinated purge controls by tag, path prefix, or everything | Immediate `cache.delete()` in the current colo plus a global purge-by-tag across all colos |
 | Cache topology | Managed Workers cache with cache status and revalidation behavior | Cache API contents do not replicate and do not use tiered caching |
 
@@ -81,11 +81,16 @@ Cache-Control: public, max-age=30, stale-while-revalidate=86400
 ```
 
 The `max-age` is the consistency knob. It could be 10 seconds, 30 seconds, or
-one minute depending on how quickly a changed key must become visible. With a
-10-second value, for example, a deployment may leave the previous value visible
-for roughly 10 seconds. Once the entry becomes stale, Workers Caching can serve
-that cached value immediately while it fetches the new value from R2 in the
-background. A subsequent request receives the refreshed value.
+one minute depending on how quickly a changed key must become visible. Once the
+entry is stale, Workers Caching can serve that cached value immediately while
+it fetches the new value from R2 in the background.
+
+The updater does not need to make an end user trigger that refresh. After it
+changes the R2 object, it fires a request to `POST /refresh/<key>`. That route
+calls the same cache-enabled `R2Origin` entry point with the same cache key used
+by readers. Assuming the entry is stale, the refresh request receives the old
+cached response and starts background revalidation. A user request arriving a
+few seconds later receives the newly warmed value.
 
 The important property is that a warm, resident entry remains cache-served
 while revalidation runs. Users do not have to absorb a deliberate cold miss
@@ -93,15 +98,15 @@ every time a value changes, and deployments do not create a synchronized purge
 and refill wave. Cold starts and cache eviction can still require an R2 read,
 but normal updates do not intentionally empty the cache.
 
-The lifecycle becomes:
+The proactive lifecycle becomes:
 
 ```text
 deploy or update
-  → continue serving the warm cached value
-  → reach the short max-age
-  → serve stale immediately
+  → write the new value to R2
+  → fire POST /refresh/<key>
+  → serve stale to the deployment hook
   → refresh from R2 in the background
-  → serve the new value
+  → serve the warm new value to users
 ```
 
 If the application can tolerate this bounded eventual consistency, the result
@@ -117,7 +122,8 @@ The public entry point calls the exported `R2Origin` entry point through
 is cache-enabled, avoiding two stacked cache windows.
 
 ```text
-GET /keys/<URL-encoded-R2-key>
+GET  /keys/<URL-encoded-R2-key>
+POST /refresh/<URL-encoded-R2-key>
 ```
 
 The origin response uses:
@@ -134,6 +140,25 @@ MISS → HIT → UPDATING at age 30 → HIT with the new R2 value
 
 In the verification run, an overwritten R2 value became visible 29 seconds
 after the update.
+
+### Update R2 and trigger background revalidation
+
+The `update-and-refresh` command uploads a new R2 value and immediately calls
+the refresh route. This example assumes the cache entry is already stale.
+
+```bash
+printf 'version two\n' > /tmp/demo.txt
+
+WORKER_URL=https://workers-cache-for-keys.example.com \
+  pnpm --filter @workers-cache-for-keys/workers-caching \
+  update-and-refresh -- demo.txt /tmp/demo.txt
+```
+
+The refresh call intentionally receives the stale cached object. Workers
+Caching revalidates against R2 in the background, so subsequent reader requests
+receive the updated value without a global purge or a user-facing cold miss.
+
+Protect the refresh route before using this pattern in production.
 
 ## Cache API app
 

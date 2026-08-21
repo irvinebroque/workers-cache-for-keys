@@ -3,14 +3,15 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 const EDGE_MAX_AGE_SECONDS = 30;
 const STALE_WHILE_REVALIDATE_SECONDS = 24 * 60 * 60;
 const KEY_PATH_PREFIX = "/keys/";
+const REFRESH_PATH_PREFIX = "/refresh/";
+const CACHE_KEY_ORIGIN = "https://r2-origin.internal";
 
-function keyFromRequest(request: Request): string | null {
-	const pathname = new URL(request.url).pathname;
-	if (!pathname.startsWith(KEY_PATH_PREFIX)) {
+function keyFromPath(pathname: string, prefix: string): string | null {
+	if (!pathname.startsWith(prefix)) {
 		return null;
 	}
 
-	const encodedKey = pathname.slice(KEY_PATH_PREFIX.length);
+	const encodedKey = pathname.slice(prefix.length);
 	if (encodedKey.length === 0) {
 		return null;
 	}
@@ -20,6 +21,17 @@ function keyFromRequest(request: Request): string | null {
 	} catch {
 		return null;
 	}
+}
+
+function keyFromRequest(request: Request): string | null {
+	return keyFromPath(new URL(request.url).pathname, KEY_PATH_PREFIX);
+}
+
+function cacheRequestForKey(key: string, method = "GET"): Request {
+	return new Request(
+		`${CACHE_KEY_ORIGIN}${KEY_PATH_PREFIX}${encodeURIComponent(key)}`,
+		{ method },
+	);
 }
 
 function json(data: unknown, init: ResponseInit = {}): Response {
@@ -44,6 +56,7 @@ export default {
 			return json({
 				message: "Fetch an R2 object at /keys/<key>",
 				example: `${url.origin}/keys/demo.txt`,
+				triggerRefresh: `POST ${url.origin}/refresh/demo.txt`,
 				edgeCache: {
 					maxAgeSeconds: EDGE_MAX_AGE_SECONDS,
 					staleWhileRevalidateSeconds: STALE_WHILE_REVALIDATE_SECONDS,
@@ -51,10 +64,34 @@ export default {
 			});
 		}
 
+		const refreshKey = keyFromPath(url.pathname, REFRESH_PATH_PREFIX);
+		if (refreshKey !== null && request.method === "POST") {
+			// This request intentionally targets the exact same cache key used by
+			// readers. Assuming the entry is stale, Workers Caching serves the
+			// stale response here and refreshes it from R2 in the background.
+			const staleResponse = await ctx.exports.R2Origin.fetch(
+				cacheRequestForKey(refreshKey),
+			);
+			const result = {
+				key: refreshKey,
+				refreshTriggered: staleResponse.ok,
+				cacheStatus: staleResponse.headers.get("cf-cache-status"),
+				servedEtag: staleResponse.headers.get("etag"),
+				servedOriginFetch: staleResponse.headers.get(
+					"x-origin-fetched-at",
+				),
+			};
+			await staleResponse.body?.cancel();
+
+			return json(result, {
+				status: staleResponse.ok ? 202 : staleResponse.status,
+			});
+		}
+
 		if (request.method !== "GET" && request.method !== "HEAD") {
 			return json(
-				{ error: "Only GET and HEAD are supported." },
-				{ status: 405, headers: { allow: "GET, HEAD" } },
+				{ error: "Use GET or HEAD for /keys/<key>, or POST /refresh/<key>." },
+				{ status: 405, headers: { allow: "GET, HEAD, POST" } },
 			);
 		}
 
@@ -66,13 +103,9 @@ export default {
 			);
 		}
 
-		// Ignore query parameters so diagnostics do not accidentally fragment the
-		// cache. The R2 key is entirely represented by the path.
-		const cacheUrl = new URL(request.url);
-		cacheUrl.search = "";
-		const cacheRequest = new Request(cacheUrl, request);
-
-		return ctx.exports.R2Origin.fetch(cacheRequest);
+		return ctx.exports.R2Origin.fetch(
+			cacheRequestForKey(key, request.method),
+		);
 	},
 } satisfies ExportedHandler<Env>;
 

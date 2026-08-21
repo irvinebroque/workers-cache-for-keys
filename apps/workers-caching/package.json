@@ -6,6 +6,7 @@
     "check": "pnpm run cf-typegen && pnpm run typecheck && pnpm run test && wrangler deploy --dry-run",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
+    "update-and-refresh": "sh scripts/update-and-refresh.sh",
     "test": "vitest --run",
     "typecheck": "tsc --noEmit",
     "cf-typegen": "wrangler types"
