@@ -1,29 +1,48 @@
-import {
-	env,
-	createExecutionContext,
-	waitOnExecutionContext,
-	SELF,
-} from "cloudflare:test";
-import { describe, it, expect } from "vitest";
-import worker from "../src/index";
+import { env, SELF } from "cloudflare:test";
+import { describe, expect, it } from "vitest";
 
-// For now, you'll need to do something like this to get a correctly-typed
-// `Request` to pass to `worker.fetch()`.
-const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
+describe("R2 key cache Worker", () => {
+	it("returns usage information at the root", async () => {
+		const response = await SELF.fetch("https://example.com/");
 
-describe("Hello World worker", () => {
-	it("responds with Hello World! (unit style)", async () => {
-		const request = new IncomingRequest("http://example.com");
-		// Create an empty context to pass to `worker.fetch()`.
-		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, env, ctx);
-		// Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
-		await waitOnExecutionContext(ctx);
-		expect(await response.text()).toMatchInlineSnapshot(`"Hello World!"`);
+		expect(response.status).toBe(200);
+		expect(response.headers.get("cache-control")).toBe("no-store");
+		await expect(response.json()).resolves.toMatchObject({
+			edgeCache: {
+				maxAgeSeconds: 30,
+				staleWhileRevalidateSeconds: 86_400,
+			},
+		});
 	});
 
-	it("responds with Hello World! (integration style)", async () => {
-		const response = await SELF.fetch("https://example.com");
-		expect(await response.text()).toMatchInlineSnapshot(`"Hello World!"`);
+	it("serves an object from the bound R2 bucket", async () => {
+		const key = `test-${crypto.randomUUID()}.txt`;
+		await env.KEY_BUCKET.put(key, "value from R2", {
+			httpMetadata: { contentType: "text/plain; charset=utf-8" },
+		});
+
+		const response = await SELF.fetch(`https://example.com/keys/${key}`);
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("content-type")).toBe(
+			"text/plain; charset=utf-8",
+		);
+		expect(response.headers.get("cache-control")).toBe(
+			"public, max-age=30, stale-while-revalidate=86400",
+		);
+		expect(response.headers.get("x-r2-key")).toBe(key);
+		expect(await response.text()).toBe("value from R2");
+	});
+
+	it("does not cache missing objects", async () => {
+		const key = `missing-${crypto.randomUUID()}.txt`;
+		const response = await SELF.fetch(`https://example.com/keys/${key}`);
+
+		expect(response.status).toBe(404);
+		expect(response.headers.get("cache-control")).toBe("no-store");
+		await expect(response.json()).resolves.toEqual({
+			error: "R2 object not found.",
+			key,
+		});
 	});
 });

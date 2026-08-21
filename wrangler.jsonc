@@ -6,11 +6,36 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "workers-cache-for-keys",
 	"main": "src/index.ts",
-	"compatibility_date": "2026-08-20",
-	"observability": {
+	"compatibility_date": "2026-08-21",
+	"compatibility_flags": ["nodejs_compat"],
+	"cache": {
 		"enabled": true
 	},
-	"upload_source_maps": true
+	"exports": {
+		"default": {
+			"type": "worker",
+			"cache": {
+				"enabled": false
+			}
+		},
+		"R2Origin": {
+			"type": "worker",
+			"cache": {
+				"enabled": true
+			}
+		}
+	},
+	"observability": {
+		"enabled": true,
+		"head_sampling_rate": 1
+	},
+	"upload_source_maps": true,
+	"r2_buckets": [
+		{
+			"binding": "KEY_BUCKET",
+			"bucket_name": "workers-cache-for-keys"
+		}
+	]
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
