@@ -1,56 +1,103 @@
-# R2 keys served through Workers Caching
+# R2 caching patterns for Cloudflare Workers
 
-This Worker exposes objects from an R2 bucket at:
+This pnpm monorepo contains two Workers that serve keys from the same R2 bucket
+using different cache strategies.
+
+## Workspace layout
+
+| App | Worker | Strategy |
+| --- | --- | --- |
+| `apps/workers-caching` | `workers-cache-for-keys` | Workers Caching with `max-age=30` and `stale-while-revalidate=86400` |
+| `apps/cache-api` | `workers-cache-for-keys-cache-api` | Explicit `caches.default.match()`, `cache.put()`, and `cache.delete()` |
+
+Both Workers bind the `workers-cache-for-keys` R2 bucket as `KEY_BUCKET`.
+
+## Comparison
+
+| Tradeoff | Workers Caching | Cache API plus purge |
+| --- | --- | --- |
+| Cache population | Automatic when the cache-enabled `R2Origin` entry point returns a cacheable response | Worker explicitly calls `caches.default.put()` after an R2 miss |
+| Cache lookup | Automatic around the cache-enabled entry point | Worker explicitly calls `caches.default.match()` |
+| Worker execution on a hit | The public gateway runs, but the cached `R2Origin` entry point does not | The Worker runs and performs `cache.match()` on every request |
+| Freshness model | 30 seconds fresh, then stale content may be served for up to one day while revalidation runs | One-day TTL; correctness depends on purging whenever R2 changes |
+| Update behavior | First request after expiry receives hot stale data and triggers a background R2 refresh | `PUT` and `DELETE` update R2 and immediately call `caches.default.delete()` |
+| Availability during refresh | Built-in stale-while-revalidate keeps serving the cached value | A purged key becomes a miss; the next request must read R2 before responding |
+| Invalidation scope | Workers Caching supports coordinated purge controls by tag, path prefix, or everything | `cache.delete()` only deletes the entry in the data center handling that request |
+| Cache topology | Managed Workers cache with cache status and revalidation behavior | Cache API contents do not replicate and do not use tiered caching |
+| Out-of-band R2 changes | Become visible after the 30-second fresh window and a request-driven revalidation | Remain cached until TTL expiry unless the writer calls the purge endpoint in every relevant data center or uses a separate global purge mechanism |
+| Best fit | Read-heavy values where always-hot responses and bounded eventual freshness are desirable | Write-through systems where every mutation is controlled and explicit cache lifecycle code is preferred |
+
+The Cache API example deliberately makes its limitation visible: updating R2
+directly does not invalidate the cached copy. Call `POST /purge/<key>` after an
+out-of-band update. That endpoint uses `caches.default.delete()`, so it is a
+local-data-center purge rather than a globally coordinated purge.
+
+## Workers Caching app
+
+The public entry point calls the exported `R2Origin` entry point through
+`ctx.exports`. The public entry point is opted out of caching; only `R2Origin`
+is cache-enabled, avoiding two stacked cache windows.
 
 ```text
 GET /keys/<URL-encoded-R2-key>
 ```
 
-It has two Worker entry points:
-
-1. The default public `fetch` handler calls `ctx.exports.R2Origin`.
-2. `R2Origin` reads the object from the `KEY_BUCKET` R2 binding.
-
-The public entry point is explicitly opted out of caching so it always runs as
-the gateway. Only the `R2Origin` loopback entry point is cache-enabled; this
-avoids stacking two independent 30-second stale-while-revalidate windows.
-Successful object responses use:
+The origin response uses:
 
 ```text
-max-age=30, stale-while-revalidate=86400
+Cache-Control: public, max-age=30, stale-while-revalidate=86400
 ```
 
-For the first 30 seconds, requests are served from the fresh edge cache. After
-that, the next request can be served immediately from the stale cache while
-Cloudflare refreshes the value from R2 in the background. A subsequent request
-then receives the refreshed object.
+Observed deployed behavior:
 
-The response exposes `X-Origin-Fetched-At`, `X-R2-ETag`, and
-`X-R2-Uploaded-At` headers so the refresh is easy to observe. Workers Caching
-consumes the origin cache policy and returns `Cache-Control: no-store` to the
-client. Use `curl` to watch `CF-Cache-Status` change from `MISS` to `HIT` and
-then `UPDATING`.
+```text
+MISS → HIT → UPDATING at age 30 → HIT with the new R2 value
+```
+
+In the verification run, an overwritten R2 value became visible 29 seconds
+after the update.
+
+## Cache API app
+
+```text
+GET    /keys/<key>   # match cache; on miss read R2 and cache.put()
+PUT    /keys/<key>   # write R2, then cache.delete()
+DELETE /keys/<key>   # delete R2, then cache.delete()
+POST   /purge/<key>  # cache.delete() without changing R2
+```
+
+Responses include `X-Cache-API-Status: MISS|HIT`. Client-side caching is
+disabled on returned responses so the example always exercises the Worker.
+
+The mutation and purge endpoints are intentionally unauthenticated for a small
+demo. Add authentication before deploying this Worker against a bucket that
+contains real data.
 
 ## Commands
 
 ```bash
-npm test
-npm run cf-typegen
-npx wrangler r2 bucket create workers-cache-for-keys
-npx wrangler r2 object put workers-cache-for-keys/demo.txt --remote --file ./demo.txt
-npm run deploy
+pnpm install
+pnpm check
+pnpm test
+pnpm typecheck
+pnpm cf-typegen
+
+pnpm deploy:workers-caching
+pnpm deploy:cache-api
 ```
 
-## Update demonstration
+Run one app locally:
 
-Request the object repeatedly, overwrite `demo.txt` in R2, and continue
-requesting it. The old value remains hot during the 30-second fresh period. The
-first request after expiry can receive stale content while triggering
-background revalidation; the next request receives the new R2 value.
+```bash
+pnpm --filter @workers-cache-for-keys/workers-caching dev
+pnpm --filter @workers-cache-for-keys/cache-api dev
+```
 
-This is request-driven revalidation. If no request arrives after the 30-second
-fresh period, no background refresh is started until one does.
+Seed a remote R2 object:
 
-Workers Caching behavior must be verified after deployment; the local Workers
-runtime currently invokes the loopback entry point but does not emulate its
-edge cache.
+```bash
+printf 'version one\n' > /tmp/demo.txt
+pnpm --filter @workers-cache-for-keys/workers-caching exec \
+  wrangler r2 object put workers-cache-for-keys/demo.txt \
+  --remote --file /tmp/demo.txt --content-type text/plain
+```

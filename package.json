@@ -2,18 +2,13 @@
   "name": "workers-cache-for-keys",
   "version": "0.0.0",
   "private": true,
+  "packageManager": "pnpm@10.34.5",
   "scripts": {
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev",
-    "start": "wrangler dev",
-    "test": "vitest",
-    "cf-typegen": "wrangler types"
-  },
-  "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.22.0",
-    "@types/node": "^26.2.0",
-    "typescript": "^5.5.2",
-    "vitest": "~4.1.0",
-    "wrangler": "^4.125.0"
+    "check": "pnpm -r check",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "cf-typegen": "pnpm -r cf-typegen",
+    "deploy:workers-caching": "pnpm --filter @workers-cache-for-keys/workers-caching deploy",
+    "deploy:cache-api": "pnpm --filter @workers-cache-for-keys/cache-api deploy"
   }
 }
