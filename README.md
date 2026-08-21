@@ -12,6 +12,42 @@ using different cache strategies.
 
 Both Workers bind the `workers-cache-for-keys` R2 bucket as `KEY_BUCKET`.
 
+## Browser demo
+
+The Workers Caching app includes an interactive browser demo at its root URL.
+It runs the complete stale-while-revalidate flow against an isolated
+`browser-demo/<uuid>.txt` key:
+
+1. Write `version one` to R2.
+2. Request the key twice to show the cache moving from `MISS` to `HIT`.
+3. Wait for the 30-second `max-age` to expire.
+4. Write `version two` to R2 without purging the cached value.
+5. Call `POST /refresh/<key>`, which receives stale `version one` and starts
+   background revalidation.
+6. Poll until a reader receives warm `version two`.
+
+The page shows the R2 value, edge-cache value, browser-visible value,
+`CF-Cache-Status`, age, ETag, and a timestamped request timeline.
+
+Run it locally:
+
+```bash
+pnpm --filter @workers-cache-for-keys/workers-caching dev
+```
+
+Then open the local Wrangler URL in a browser. Local development exercises the
+UI and R2 flow, but the local runtime does not emulate the production Workers
+cache. Deploy the Worker to observe real `MISS`, `HIT`, and `UPDATING`
+transitions:
+
+```bash
+pnpm deploy:workers-caching
+```
+
+The demo exposes narrowly scoped, unauthenticated write/delete endpoints for
+keys matching `browser-demo/<id>.txt`, with values limited to 1 KiB. Protect or
+remove these endpoints before adapting the demo to a production bucket.
+
 ## Comparison
 
 | Tradeoff | Workers Caching | Cache API plus purge |
@@ -121,6 +157,28 @@ The public entry point calls the exported `R2Origin` entry point through
 `ctx.exports`. The public entry point is opted out of caching; only `R2Origin`
 is cache-enabled, avoiding two stacked cache windows.
 
+```mermaid
+sequenceDiagram
+    participant Deploy as Updater
+    participant R2
+    participant A as Entrypoint A
+    participant Cache as Workers Cache
+    participant B as R2Origin
+    participant User
+
+    Deploy->>R2: Write new key value
+    Deploy->>A: POST /refresh/key
+    A->>Cache: Request the reader cache key
+    Cache-->>A: Serve stale value immediately
+    Cache->>B: Revalidate in background
+    B->>R2: Read latest value
+    R2-->>B: Return new value
+    B-->>Cache: Store fresh response
+    User->>A: GET /keys/key
+    A->>Cache: Request the same cache key
+    Cache-->>User: Serve warm new value
+```
+
 ```text
 GET  /keys/<URL-encoded-R2-key>
 POST /refresh/<URL-encoded-R2-key>
@@ -161,6 +219,30 @@ receive the updated value without a global purge or a user-facing cold miss.
 Protect the refresh route before using this pattern in production.
 
 ## Cache API app
+
+```mermaid
+sequenceDiagram
+    participant Writer
+    participant R2
+    participant Queue
+    participant Worker as Cache API Worker
+    participant Purge as Global Purge API
+    participant Cache as Colo Cache API
+    participant User
+
+    Writer->>R2: Create, overwrite, or delete key
+    R2->>Queue: Emit object-change event
+    Queue->>Worker: Deliver affected R2 key
+    Worker->>Purge: Purge the key's Cache-Tag
+    Purge-->>Cache: Evict copies across colos
+    User->>Worker: GET /keys/key
+    Worker->>Cache: caches.default.match()
+    Cache-->>Worker: MISS
+    Worker->>R2: Read latest value
+    R2-->>Worker: Return value
+    Worker->>Cache: caches.default.put()
+    Worker-->>User: Return fresh value
+```
 
 ```text
 GET    /keys/<key>   # match cache; on miss read R2 and cache.put()

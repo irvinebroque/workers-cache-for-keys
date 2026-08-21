@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 describe("R2 key cache Worker", () => {
 	it("returns usage information at the root", async () => {
-		const response = await SELF.fetch("https://example.com/");
+		const response = await SELF.fetch("https://example.com/api");
 
 		expect(response.status).toBe(200);
 		expect(response.headers.get("cache-control")).toBe("no-store");
@@ -13,6 +13,27 @@ describe("R2 key cache Worker", () => {
 				staleWhileRevalidateSeconds: 86_400,
 			},
 		});
+	});
+
+	it("lets the browser demo write and clean up isolated R2 keys", async () => {
+		const key = `browser-demo/${crypto.randomUUID()}.txt`;
+		const encodedKey = encodeURIComponent(key);
+
+		const update = await SELF.fetch(
+			`https://example.com/demo/keys/${encodedKey}`,
+			{ method: "PUT", body: "browser version one" },
+		);
+		expect(update.status).toBe(200);
+
+		const object = await env.KEY_BUCKET.get(key);
+		expect(await object?.text()).toBe("browser version one");
+
+		const cleanup = await SELF.fetch(
+			`https://example.com/demo/keys/${encodedKey}`,
+			{ method: "DELETE" },
+		);
+		expect(cleanup.status).toBe(200);
+		expect(await env.KEY_BUCKET.get(key)).toBeNull();
 	});
 
 	it("serves an object from the bound R2 bucket", async () => {

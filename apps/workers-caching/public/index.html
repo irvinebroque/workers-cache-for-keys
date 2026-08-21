@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<meta
+			name="description"
+			content="Interactive demonstration of Cloudflare Workers Caching with stale-while-revalidate and R2."
+		/>
+		<title>Warm Through Change · Workers Caching Demo</title>
+		<link rel="stylesheet" href="/styles.css" />
+		<script src="/demo.js" defer></script>
+	</head>
+	<body>
+		<div class="page-shell">
+			<header class="hero">
+				<div class="eyebrow">
+					<span class="pulse-dot"></span>
+					Cloudflare Workers Caching + R2
+				</div>
+				<h1>Warm through change.</h1>
+				<p class="hero-copy">
+					Watch a stale value remain instantly available while a deployment
+					request refreshes the cache from R2 in the background.
+				</p>
+				<div class="hero-actions">
+					<button id="run-demo" class="primary-button">
+						<span>Run the 35-second demo</span>
+						<svg viewBox="0 0 20 20" aria-hidden="true">
+							<path d="m7 4 6 6-6 6" />
+						</svg>
+					</button>
+					<button id="reset-demo" class="secondary-button" disabled>
+						New demo key
+					</button>
+				</div>
+			</header>
+
+			<main>
+				<section class="flow-panel" aria-labelledby="flow-title">
+					<div class="section-heading">
+						<div>
+							<p class="section-kicker">Live cache state</p>
+							<h2 id="flow-title">One key, three perspectives</h2>
+						</div>
+						<div id="run-status" class="status-pill" data-state="idle">
+							Ready
+						</div>
+					</div>
+
+					<div class="key-strip">
+						<span>Demo key</span>
+						<code id="demo-key">browser-demo/…</code>
+					</div>
+
+					<div class="state-grid">
+						<article class="state-card r2-card">
+							<div class="state-icon">R2</div>
+							<div>
+								<p class="state-label">Origin value</p>
+								<strong id="r2-value">Not written</strong>
+								<small id="r2-meta">Waiting for the demo</small>
+							</div>
+						</article>
+
+						<div class="connector">
+							<span></span>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="m9 5 7 7-7 7" />
+							</svg>
+						</div>
+
+						<article class="state-card cache-card">
+							<div class="state-icon">CF</div>
+							<div>
+								<p class="state-label">Edge cache</p>
+								<strong id="cache-value">Empty</strong>
+								<small id="cache-meta">No request yet</small>
+							</div>
+						</article>
+
+						<div class="connector">
+							<span></span>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="m9 5 7 7-7 7" />
+							</svg>
+						</div>
+
+						<article class="state-card user-card">
+							<div class="state-icon">You</div>
+							<div>
+								<p class="state-label">Browser receives</p>
+								<strong id="browser-value">Nothing yet</strong>
+								<small id="browser-meta">Waiting for a request</small>
+							</div>
+						</article>
+					</div>
+
+					<div class="countdown-block">
+						<div class="countdown-copy">
+							<span id="countdown-label">Freshness window</span>
+							<strong id="countdown-value">30s</strong>
+						</div>
+						<div class="progress-track">
+							<div id="progress-bar" class="progress-bar"></div>
+						</div>
+					</div>
+				</section>
+
+				<section class="timeline-panel" aria-labelledby="timeline-title">
+					<div class="section-heading">
+						<div>
+							<p class="section-kicker">Request timeline</p>
+							<h2 id="timeline-title">See each transition</h2>
+						</div>
+						<div class="legend">
+							<span><i class="legend-dot miss"></i>Miss</span>
+							<span><i class="legend-dot hit"></i>Hit</span>
+							<span><i class="legend-dot updating"></i>Updating</span>
+						</div>
+					</div>
+
+					<div id="empty-timeline" class="empty-timeline">
+						<div class="empty-glyph">↳</div>
+						<p>Run the demo to populate the request timeline.</p>
+					</div>
+
+					<div id="timeline" class="timeline" aria-live="polite"></div>
+				</section>
+
+				<section class="explanation-grid">
+					<article>
+						<span class="step-number">01</span>
+						<h3>Warm the key</h3>
+						<p>
+							The first request reads version one from R2. The next request
+							is served from Workers Caching.
+						</p>
+					</article>
+					<article>
+						<span class="step-number">02</span>
+						<h3>Change R2</h3>
+						<p>
+							After the 30-second freshness window, version two is written
+							without purging the warm entry.
+						</p>
+					</article>
+					<article>
+						<span class="step-number">03</span>
+						<h3>Refresh quietly</h3>
+						<p>
+							The deployment request absorbs the stale response and starts
+							background revalidation. The next reader gets version two.
+						</p>
+					</article>
+				</section>
+			</main>
+
+			<footer>
+				<p>
+					The demo uses an isolated <code>browser-demo/</code> key and can
+					clean it up when you reset.
+				</p>
+			</footer>
+		</div>
+	</body>
+</html>

@@ -4,7 +4,10 @@ const EDGE_MAX_AGE_SECONDS = 30;
 const STALE_WHILE_REVALIDATE_SECONDS = 24 * 60 * 60;
 const KEY_PATH_PREFIX = "/keys/";
 const REFRESH_PATH_PREFIX = "/refresh/";
+const DEMO_KEY_PATH_PREFIX = "/demo/keys/";
 const CACHE_KEY_ORIGIN = "https://r2-origin.internal";
+const DEMO_KEY_PATTERN = /^browser-demo\/[a-z0-9-]{1,80}\.txt$/;
+const MAX_DEMO_VALUE_BYTES = 1024;
 
 function keyFromPath(pathname: string, prefix: string): string | null {
 	if (!pathname.startsWith(prefix)) {
@@ -34,6 +37,42 @@ function cacheRequestForKey(key: string, method = "GET"): Request {
 	);
 }
 
+async function readLimitedText(
+	request: Request,
+	maxBytes: number,
+): Promise<string> {
+	if (request.body === null) {
+		return "";
+	}
+
+	const reader = request.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let totalBytes = 0;
+
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) {
+			break;
+		}
+
+		totalBytes += value.byteLength;
+		if (totalBytes > maxBytes) {
+			await reader.cancel();
+			throw new Error("BODY_TOO_LARGE");
+		}
+		chunks.push(value);
+	}
+
+	const body = new Uint8Array(totalBytes);
+	let offset = 0;
+	for (const chunk of chunks) {
+		body.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+
+	return new TextDecoder().decode(body);
+}
+
 function json(data: unknown, init: ResponseInit = {}): Response {
 	const headers = new Headers(init.headers);
 	headers.set("content-type", "application/json; charset=utf-8");
@@ -49,10 +88,10 @@ function json(data: unknown, init: ResponseInit = {}): Response {
  * Workers Caching. The cache key includes the entry point and request URL.
  */
 export default {
-	async fetch(request, _env, ctx): Promise<Response> {
+	async fetch(request, env, ctx): Promise<Response> {
 		const url = new URL(request.url);
 
-		if (url.pathname === "/") {
+		if (url.pathname === "/api") {
 			return json({
 				message: "Fetch an R2 object at /keys/<key>",
 				example: `${url.origin}/keys/demo.txt`,
@@ -62,6 +101,58 @@ export default {
 					staleWhileRevalidateSeconds: STALE_WHILE_REVALIDATE_SECONDS,
 				},
 			});
+		}
+
+		const demoKey = keyFromPath(url.pathname, DEMO_KEY_PATH_PREFIX);
+		if (demoKey !== null) {
+			if (!DEMO_KEY_PATTERN.test(demoKey)) {
+				return json(
+					{ error: "Browser demo keys must use browser-demo/<id>.txt." },
+					{ status: 400 },
+				);
+			}
+
+			if (request.method === "PUT") {
+				try {
+					const value = await readLimitedText(
+						request,
+						MAX_DEMO_VALUE_BYTES,
+					);
+					const object = await env.KEY_BUCKET.put(demoKey, value, {
+						httpMetadata: {
+							contentType: "text/plain; charset=utf-8",
+						},
+					});
+
+					return json({
+						key: demoKey,
+						updated: true,
+						etag: object.etag,
+						uploadedAt: object.uploaded.toISOString(),
+					});
+				} catch (error) {
+					if (
+						error instanceof Error &&
+						error.message === "BODY_TOO_LARGE"
+					) {
+						return json(
+							{ error: `Demo values are limited to ${MAX_DEMO_VALUE_BYTES} bytes.` },
+							{ status: 413 },
+						);
+					}
+					throw error;
+				}
+			}
+
+			if (request.method === "DELETE") {
+				await env.KEY_BUCKET.delete(demoKey);
+				return json({ key: demoKey, deleted: true });
+			}
+
+			return json(
+				{ error: "Use PUT or DELETE for /demo/keys/<key>." },
+				{ status: 405, headers: { allow: "PUT, DELETE" } },
+			);
 		}
 
 		const refreshKey = keyFromPath(url.pathname, REFRESH_PATH_PREFIX);
