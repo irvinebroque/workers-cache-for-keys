@@ -1,5 +1,6 @@
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { cacheTagForKey, purgeTagsGlobally } from "../src";
 
 describe("Cache API R2 Worker", () => {
 	it("documents its read, write, and purge endpoints", async () => {
@@ -45,7 +46,7 @@ describe("Cache API R2 Worker", () => {
 		expect(await refreshed.text()).toBe("version two");
 	});
 
-	it("supports an explicit purge after an out-of-band R2 update", async () => {
+	it("keeps an out-of-band R2 update stale until a global purge occurs", async () => {
 		const key = `purge-${crypto.randomUUID()}.txt`;
 		await env.KEY_BUCKET.put(key, "version one");
 
@@ -56,14 +57,30 @@ describe("Cache API R2 Worker", () => {
 		const stale = await SELF.fetch(`https://example.com/keys/${key}`);
 		expect(stale.headers.get("x-cache-api-status")).toBe("HIT");
 		expect(await stale.text()).toBe("version one");
+	});
 
-		const purge = await SELF.fetch(`https://example.com/purge/${key}`, {
-			method: "POST",
-		});
-		expect(purge.status).toBe(200);
+	it("purges deterministic per-key cache tags through the zone API", async () => {
+		const tag = await cacheTagForKey("folder/demo.txt");
+		expect(tag).toMatch(/^r2-key-[a-f0-9]{64}$/);
 
-		const refreshed = await SELF.fetch(`https://example.com/keys/${key}`);
-		expect(refreshed.headers.get("x-cache-api-status")).toBe("MISS");
-		expect(await refreshed.text()).toBe("version two");
+		const requests: Request[] = [];
+		await purgeTagsGlobally(
+			[tag],
+			{ zoneId: "test-zone", apiToken: "test-token" },
+			async (input, init) => {
+				const request = new Request(input, init);
+				requests.push(request);
+				return Response.json({ success: true });
+			},
+		);
+
+		expect(requests).toHaveLength(1);
+		expect(requests[0].url).toBe(
+			"https://api.cloudflare.com/client/v4/zones/test-zone/purge_cache",
+		);
+		expect(requests[0].headers.get("authorization")).toBe(
+			"Bearer test-token",
+		);
+		await expect(requests[0].json()).resolves.toEqual({ tags: [tag] });
 	});
 });

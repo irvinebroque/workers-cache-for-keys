@@ -14,5 +14,15 @@
 			"binding": "KEY_BUCKET",
 			"bucket_name": "workers-cache-for-keys"
 		}
-	]
+	],
+	"queues": {
+		"consumers": [
+			{
+				"queue": "workers-cache-for-keys-r2-events",
+				"max_batch_size": 10,
+				"max_batch_timeout": 5,
+				"max_retries": 5
+			}
+		]
+	}
 }
