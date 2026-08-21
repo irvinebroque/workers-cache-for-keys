@@ -29,6 +29,87 @@ all object creates and deletes to a Queue, whose consumer calls Cloudflare's
 zone purge API with that tag. This catches changes made through the Worker,
 Wrangler, the S3 API, or the dashboard.
 
+## Why the Cache API approach is problematic
+
+The Cache API version can provide strong freshness, but it does so by coupling
+every R2 change to explicit cache invalidation:
+
+1. The Worker must explicitly call `cache.match()` and `cache.put()`.
+2. Every create, overwrite, or delete in R2 must produce an invalidation event.
+3. `caches.default.delete()` only clears the current colo, so the system must
+   also perform a global purge by `Cache-Tag`.
+4. The application must manage the Queue, event-notification rules, API token,
+   zone configuration, retries, failures, and purge batching.
+
+Global purges are rate-limited using plan-dependent token buckets. Current
+purge-by-tag limits range from 5 requests per minute on Free plans to 50
+requests per second on Enterprise plans. A workload that updates many keys can
+therefore exhaust its purge allowance, require careful batching, or eventually
+need a higher limit.
+
+Purging is also operationally expensive. It deliberately turns a hot cached
+value into a cold miss. The next request for that key in each colo has to wait
+while the Worker reads the value from R2 and puts it back into the Cache API.
+That increases latency for the eyeball making the request and creates a burst
+of origin traffic immediately after a deployment or a large group of updates.
+Because Cache API entries do not replicate between data centers, the same cold
+fill can happen independently in many colos.
+
+The resulting lifecycle is:
+
+```text
+deploy or update
+  → emit R2 events
+  → consume Queue messages
+  → spend purge capacity
+  → evict hot cache entries globally
+  → make users wait on cold R2 reads
+  → explicitly repopulate each colo with cache.put()
+```
+
+This approach may still be appropriate when stale data is unacceptable, but
+the developer owns substantially more code, infrastructure, failure handling,
+and capacity planning.
+
+## Why Workers Caching with stale-while-revalidate is simpler
+
+Workers Caching reverses the tradeoff. Instead of purging on every deployment,
+the application chooses a small freshness window and permits bounded staleness:
+
+```text
+Cache-Control: public, max-age=30, stale-while-revalidate=86400
+```
+
+The `max-age` is the consistency knob. It could be 10 seconds, 30 seconds, or
+one minute depending on how quickly a changed key must become visible. With a
+10-second value, for example, a deployment may leave the previous value visible
+for roughly 10 seconds. Once the entry becomes stale, Workers Caching can serve
+that cached value immediately while it fetches the new value from R2 in the
+background. A subsequent request receives the refreshed value.
+
+The important property is that a warm, resident entry remains cache-served
+while revalidation runs. Users do not have to absorb a deliberate cold miss
+every time a value changes, and deployments do not create a synchronized purge
+and refill wave. Cold starts and cache eviction can still require an R2 read,
+but normal updates do not intentionally empty the cache.
+
+The lifecycle becomes:
+
+```text
+deploy or update
+  → continue serving the warm cached value
+  → reach the short max-age
+  → serve stale immediately
+  → refresh from R2 in the background
+  → serve the new value
+```
+
+If the application can tolerate this bounded eventual consistency, the result
+is a simpler architecture with fewer moving parts, no purge-rate planning, less
+origin load during deployments, and consistently low latency for warm keys.
+The developer declares the cache policy once rather than explicitly managing
+every cache insertion and invalidation.
+
 ## Workers Caching app
 
 The public entry point calls the exported `R2Origin` entry point through
