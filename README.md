@@ -16,16 +16,11 @@ Both Workers bind the `workers-cache-for-keys` R2 bucket as `KEY_BUCKET`.
 
 | Tradeoff | Workers Caching | Cache API plus purge |
 | --- | --- | --- |
-| Cache population | Automatic when the cache-enabled `R2Origin` entry point returns a cacheable response | Worker explicitly calls `caches.default.put()` after an R2 miss |
-| Cache lookup | Automatic around the cache-enabled entry point | Worker explicitly calls `caches.default.match()` |
-| Worker execution on a hit | The public gateway runs, but the cached `R2Origin` entry point does not | The Worker runs and performs `cache.match()` on every request |
 | Freshness model | 30 seconds fresh, then stale content may be served for up to one day while revalidation runs | One-day TTL; correctness depends on purging whenever R2 changes |
 | Update behavior | First request after expiry receives hot stale data and triggers a background R2 refresh | `PUT` and `DELETE` update R2 and immediately call `caches.default.delete()` |
 | Availability during refresh | Built-in stale-while-revalidate keeps serving the cached value | A purged key becomes a miss; the next request must read R2 before responding |
 | Invalidation scope | Workers Caching supports coordinated purge controls by tag, path prefix, or everything | `cache.delete()` only deletes the entry in the data center handling that request |
 | Cache topology | Managed Workers cache with cache status and revalidation behavior | Cache API contents do not replicate and do not use tiered caching |
-| Out-of-band R2 changes | Become visible after the 30-second fresh window and a request-driven revalidation | Remain cached until TTL expiry unless the writer calls the purge endpoint in every relevant data center or uses a separate global purge mechanism |
-| Best fit | Read-heavy values where always-hot responses and bounded eventual freshness are desirable | Write-through systems where every mutation is controlled and explicit cache lifecycle code is preferred |
 
 The Cache API example deliberately makes its limitation visible: updating R2
 directly does not invalidate the cached copy. Call `POST /purge/<key>` after an
